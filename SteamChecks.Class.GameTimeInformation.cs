@@ -26,7 +26,7 @@
             public int GamesCount { get; set; }
 
             /// <summary>
-            /// Play time accross all Steam games
+            /// Play time across all Steam games
             /// </summary>
             public int PlaytimeAll { get; set; }
 

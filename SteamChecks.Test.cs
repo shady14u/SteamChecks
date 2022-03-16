@@ -1,6 +1,5 @@
 ﻿#region Using Statements
 
-using Newtonsoft.Json;
 using Oxide.Core.Libraries.Covalence;
 
 #endregion

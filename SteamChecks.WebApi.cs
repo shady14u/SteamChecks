@@ -1,8 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 
 
 namespace Oxide.Plugins
@@ -18,17 +16,6 @@ namespace Oxide.Plugins
         /// <param name="steamId64"></param>
         /// <param name="callback">Callback returning the HTTP status code <see cref="StatusCode"></see> and a JSON JObject</param>
         /// <param name="additionalArguments">Additional arguments, e.g. &foo=bar</param>
-        //private void SteamWebRequest(SteamRequestType steamRequestType, string endpoint, string steamId64,
-        //    Action<int, JObject> callback, string additionalArguments = "")
-        //{
-        //    var requestUrl = $"{apiURL}/{steamRequestType}/{endpoint}/?key={apiKey}&{(steamRequestType == SteamRequestType.IPlayerService ? "steamid" : "steamids")}={steamId64}{additionalArguments}";
-
-        //    webrequest.Enqueue(requestUrl, "", (httpCode, response) =>
-        //    {
-        //        callback(httpCode, httpCode == (int)StatusCode.Success ? JObject.Parse(response) : null);
-        //    }, this, Core.Libraries.RequestMethod.GET, null, webTimeout);
-        //}
-
         private void SteamWebRequest(SteamRequestType steamRequestType, string endpoint, string steamId64,
             Action<int, string> callback, string additionalArguments = "")
         {
@@ -207,7 +194,7 @@ namespace Oxide.Plugins
         /// <summary>
         /// Fetched the level of a given badgeid from a JSON Web API result
         /// </summary>
-        /// <param name="steamApiResponse"></param>
+        /// <param name="response"></param>
         /// <param name="badgeId">ID of the badge, see <see cref="Badge"></see></param>
         /// <returns>level of the badge, or 0 if badge not existing</returns>
         private int ParseBadgeLevel(string response, Badge badgeId)

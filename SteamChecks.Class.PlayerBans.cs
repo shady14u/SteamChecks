@@ -10,7 +10,7 @@
             #region Properties and Indexers
 
             /// <summary>
-            /// Wether the user has a community ban
+            /// if the user has a community ban
             /// </summary>
             public bool CommunityBan { get; set; }
 

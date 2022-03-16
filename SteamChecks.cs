@@ -112,7 +112,7 @@ namespace Oxide.Plugins
                     {
                         GetSteamLevel(steamId, (steamLevelStatusCode, steamLevelResult) =>
                         {
-                            if (steamLevelStatusCode != (int)SteamChecks.StatusCode.Success)
+                            if (steamLevelStatusCode != (int)StatusCode.Success)
                             {
                                 ApiError(steamId, "GetSteamLevel", statusCode);
                                 return;
@@ -121,7 +121,6 @@ namespace Oxide.Plugins
                             if (minSteamLevel > steamLevelResult)
                             {
                                 callback(false, Lang("KickMinSteamLevel", steamId));
-                                return;
                             }
                             else
                             {
@@ -149,10 +148,10 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
-        /// Checks a steamid, wether it would be allowed into the server
+        /// Checks a steamId, and if it would be allowed into the server
         /// Called by <see cref="CheckPlayer"></see>
         /// </summary>
-        /// <param name="steamid">steamid64 of the user</param>
+        /// <param name="steamId">steamId64 of the user</param>
         /// <param name="callback">
         /// First parameter is true, when the user is allowed, otherwise false
         /// Second parameter is the reason why he is not allowed, filled out when first is false
@@ -162,55 +161,55 @@ namespace Oxide.Plugins
         /// - Game Hours and Count
         /// - Game badges, to get amount of games if user has hidden Game Hours
         /// </remarks>
-        void CheckPlayerGameTime(string steamid, Action<bool, string> callback)
+        void CheckPlayerGameTime(string steamId, Action<bool, string> callback)
         {
-            GetPlaytimeInformation(steamid, (gameTimeStatusCode, gameTimeResult) =>
+            GetPlaytimeInformation(steamId, (gameTimeStatusCode, gameTimeResult) =>
             {
                 // Players can additionally hide their play time, check
-                bool gametimeHidden = false;
+                var gameTimeHidden = false;
                 if (gameTimeStatusCode == (int)StatusCode.GameInfoHidden)
                 {
-                    gametimeHidden = true;
+                    gameTimeHidden = true;
                 }
                 // Check if the request failed in general
                 else if (gameTimeStatusCode != (int)StatusCode.Success)
                 {
-                    ApiError(steamid, "GetPlaytimeInformation", gameTimeStatusCode);
+                    ApiError(steamId, "GetPlaytimeInformation", gameTimeStatusCode);
                     return;
                 }
 
                 // In rare cases, the SteamAPI returns all games, however with the game time set to 0. (when the user has this info hidden)
                 if (gameTimeResult != null && (gameTimeResult.PlaytimeRust == 0 || gameTimeResult.PlaytimeAll == 0))
-                    gametimeHidden = true;
+                    gameTimeHidden = true;
 
                 // If the server owner really wants a hour check, we will kick
-                if (gametimeHidden && forceHoursPlayedKick)
+                if (gameTimeHidden && forceHoursPlayedKick)
                 {
                     if (minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
                         minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
                     {
-                        callback(false, Lang("KickHoursPrivate", steamid));
+                        callback(false, Lang("KickHoursPrivate", steamId));
                         return;
                     }
                 }
                 // Check the times and game count now, when not hidden
-                else if (!gametimeHidden)
+                else if (!gameTimeHidden && gameTimeResult!=null)
                 {
                     if (minRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust < minRustHoursPlayed)
                     {
-                        callback(false, Lang("KickMinRustHoursPlayed", steamid));
+                        callback(false, Lang("KickMinRustHoursPlayed", steamId));
                         return;
                     }
 
                     if (maxRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust > maxRustHoursPlayed)
                     {
-                        callback(false, Lang("KickMaxRustHoursPlayed", steamid));
+                        callback(false, Lang("KickMaxRustHoursPlayed", steamId));
                         return;
                     }
 
                     if (minAllGamesHoursPlayed > 0 && gameTimeResult.PlaytimeAll < minAllGamesHoursPlayed)
                     {
-                        callback(false, Lang("KickMinSteamHoursPlayed", steamid));
+                        callback(false, Lang("KickMinSteamHoursPlayed", steamId));
                         return;
                     }
 
@@ -219,41 +218,39 @@ namespace Oxide.Plugins
                         gameTimeResult.GamesCount >
                         1) // it makes only sense to check, if there are other games in the result set
                     {
-                        callback(false, Lang("KickMinNonRustPlayed", steamid));
+                        callback(false, Lang("KickMinNonRustPlayed", steamId));
                         return;
                     }
 
                     if (minGameCount > 1 && gameTimeResult.GamesCount < minGameCount)
                     {
-                        callback(false, Lang("KickGameCount", steamid));
+                        callback(false, Lang("KickGameCount", steamId));
                         return;
                     }
                 }
 
                 // If the server owner wants to check minimum amount of games, but the user has hidden game time
                 // We will get the count over an additional API request via badges
-                if (gametimeHidden && minGameCount > 1)
+                if (gameTimeHidden && minGameCount > 1)
                 {
-                    GetSteamBadges(steamid, (badgeStatusCode, badgeResult) =>
+                    GetSteamBadges(steamId, (badgeStatusCode, badgeResult) =>
                     {
                         // Check if the request failed in general
                         if (badgeStatusCode != (int)StatusCode.Success)
                         {
-                            ApiError(steamid, "GetPlaytimeInformation", gameTimeStatusCode);
+                            ApiError(steamId, "GetPlaytimeInformation", gameTimeStatusCode);
                             return;
                         }
 
                         var gamesOwned = ParseBadgeLevel(badgeResult, Badge.GamesOwned);
                         if (gamesOwned < minGameCount)
                         {
-                            callback(false, Lang("KickGameCount", steamid));
-                            return;
+                            callback(false, Lang("KickGameCount", steamId));
                         }
                         else
                         {
                             // Checks passed
                             callback(true, null);
-                            return;
                         }
                     });
                 }
