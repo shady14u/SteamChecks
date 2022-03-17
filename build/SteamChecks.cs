@@ -1,18 +1,643 @@
-#define DEBUG
 using Newtonsoft.Json;
+using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 
 //SteamChecks created with PluginMerge v(1.0.4.0) by MJSU @ https://github.com/dassjosh/Plugin.Merge
 namespace Oxide.Plugins
 {
-    [Info("Steam Checks", "Shady14u", "5.0.6")]
+    [Info("Steam Checks", "Shady14u", "5.0.7")]
     [Description("Kick players depending on information on their Steam profile")]
     public partial class SteamChecks : CovalencePlugin
     {
+        #region SteamChecks.cs
+        #region Methods (Private)
+        
+        /// <summary>
+        /// Checks a steamId, if it would be allowed into the server
+        /// </summary>
+        /// <param name="steamId">steamId64 of the user</param>
+        /// <param name="callback">
+        /// First parameter is true, when the user is allowed, otherwise false
+        /// Second parameter is the reason why he is not allowed, filled out when first is false
+        /// </param>
+        /// <remarks>
+        /// Asynchronously
+        /// Runs through all checks one-by-one
+        /// 1. Bans
+        /// 2. Player Summaries (Private profile, Creation time)
+        /// 3. Player Level
+        /// Via <see cref="CheckPlayerGameTime"></see>
+        /// 4. Game Hours and Count
+        /// 5. Game badges, to get amount of games if user has hidden Game Hours
+        /// </remarks>
+        private void CheckPlayer(string steamId, Action<bool, string> callback)
+        {
+            // Check Bans first, as they are also visible on private profiles
+            GetPlayerBans(steamId, (banStatusCode, banResponse) =>
+            {
+                if (banStatusCode != (int)StatusCode.Success)
+                {
+                    ApiError(steamId, "GetPlayerBans", banStatusCode);
+                    return;
+                }
+                
+                if (banResponse.CommunityBan && kickCommunityBan)
+                {
+                    callback(false, Lang("KickCommunityBan", steamId));
+                    return;
+                }
+                
+                if (banResponse.EconomyBan && kickTradeBan)
+                {
+                    callback(false, Lang("KickTradeBan", steamId));
+                    return;
+                }
+                
+                if (banResponse.GameBanCount > maxGameBans && maxGameBans > -1)
+                {
+                    callback(false, Lang("KickGameBan", steamId));
+                    return;
+                }
+                
+                if (banResponse.VacBanCount > maxVACBans && maxVACBans > -1)
+                {
+                    callback(false, Lang("KickVacBan", steamId));
+                    return;
+                }
+                
+                if (banResponse.LastBan > 0 && banResponse.LastBan < minDaysSinceLastBan && minDaysSinceLastBan > 0)
+                {
+                    callback(false, Lang("KickVacBan", steamId));
+                    return;
+                }
+                
+                //get Player summaries - we have to check if the profile is public
+                GetSteamPlayerSummaries(steamId, (statusCode, sumResult) =>
+                {
+                    if (statusCode != (int)StatusCode.Success)
+                    {
+                        ApiError(steamId, "GetSteamPlayerSummaries", statusCode);
+                        return;
+                    }
+                    
+                    if (sumResult.NoProfile && kickNoProfile)
+                    {
+                        callback(false, Lang("KickNoProfile", steamId));
+                        return;
+                    }
+                    
+                    // Is profile not public?
+                    if (sumResult.Visibility != PlayerSummary.VisibilityType.Public)
+                    {
+                        if (kickPrivateProfile)
+                        {
+                            callback(false, Lang("KickPrivateProfile", steamId));
+                            return;
+                        }
+                        else
+                        {
+                            // If it is not public, we can cancel checks here and allow the player in
+                            callback(true, null);
+                            return;
+                        }
+                    }
+                    
+                    // Check how old the account is
+                    if (maxAccountCreationTime > 0 && sumResult.Timecreated > maxAccountCreationTime)
+                    {
+                        callback(false, Lang("KickMaxAccountCreationTime", steamId));
+                        return;
+                    }
+                    
+                    // Check Steam Level
+                    if (minSteamLevel > 0)
+                    {
+                        GetSteamLevel(steamId, (steamLevelStatusCode, steamLevelResult) =>
+                        {
+                            if (steamLevelStatusCode != (int)StatusCode.Success)
+                            {
+                                ApiError(steamId, "GetSteamLevel", statusCode);
+                                return;
+                            }
+                            
+                            if (minSteamLevel > steamLevelResult)
+                            {
+                                callback(false, Lang("KickMinSteamLevel", steamId));
+                            }
+                            else
+                            {
+                                // Check game time, and amount of games
+                                if (minGameCount > 1 || minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
+                                minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
+                                CheckPlayerGameTime(steamId, callback);
+                                else // Player now already passed all checks
+                                callback(true, null);
+                            }
+                        });
+                    }
+                    // Else, if level check not done, Check game time, and amount of games
+                    else if (minGameCount > 1 || minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
+                    minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
+                    {
+                        CheckPlayerGameTime(steamId, callback);
+                    }
+                    else // Player now already passed all checks
+                    {
+                        callback(true, null);
+                    }
+                });
+            });
+        }
+        
+        /// <summary>
+        /// Checks a steamId, and if it would be allowed into the server
+        /// Called by <see cref="CheckPlayer"></see>
+        /// </summary>
+        /// <param name="steamId">steamId64 of the user</param>
+        /// <param name="callback">
+        /// First parameter is true, when the user is allowed, otherwise false
+        /// Second parameter is the reason why he is not allowed, filled out when first is false
+        /// </param>
+        /// <remarks>
+        /// Regards those specific parts:
+        /// - Game Hours and Count
+        /// - Game badges, to get amount of games if user has hidden Game Hours
+        /// </remarks>
+        void CheckPlayerGameTime(string steamId, Action<bool, string> callback)
+        {
+            GetPlaytimeInformation(steamId, (gameTimeStatusCode, gameTimeResult) =>
+            {
+                // Players can additionally hide their play time, check
+                var gameTimeHidden = false;
+                if (gameTimeStatusCode == (int)StatusCode.GameInfoHidden)
+                {
+                    gameTimeHidden = true;
+                }
+                // Check if the request failed in general
+                else if (gameTimeStatusCode != (int)StatusCode.Success)
+                {
+                    ApiError(steamId, "GetPlaytimeInformation", gameTimeStatusCode);
+                    return;
+                }
+                
+                // In rare cases, the SteamAPI returns all games, however with the game time set to 0. (when the user has this info hidden)
+                if (gameTimeResult != null && (gameTimeResult.PlaytimeRust == 0 || gameTimeResult.PlaytimeAll == 0))
+                gameTimeHidden = true;
+                
+                // If the server owner really wants a hour check, we will kick
+                if (gameTimeHidden && forceHoursPlayedKick)
+                {
+                    if (minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
+                    minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
+                    {
+                        callback(false, Lang("KickHoursPrivate", steamId));
+                        return;
+                    }
+                }
+                // Check the times and game count now, when not hidden
+                else if (!gameTimeHidden && gameTimeResult != null)
+                {
+                    if (minRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust < minRustHoursPlayed)
+                    {
+                        callback(false, Lang("KickMinRustHoursPlayed", steamId));
+                        return;
+                    }
+                    
+                    if (maxRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust > maxRustHoursPlayed)
+                    {
+                        callback(false, Lang("KickMaxRustHoursPlayed", steamId));
+                        return;
+                    }
+                    
+                    if (minAllGamesHoursPlayed > 0 && gameTimeResult.PlaytimeAll < minAllGamesHoursPlayed)
+                    {
+                        callback(false, Lang("KickMinSteamHoursPlayed", steamId));
+                        return;
+                    }
+                    
+                    if (minOtherGamesPlayed > 0 &&
+                    (gameTimeResult.PlaytimeAll - gameTimeResult.PlaytimeRust) < minOtherGamesPlayed &&
+                    gameTimeResult.GamesCount >
+                    1) // it makes only sense to check, if there are other games in the result set
+                    {
+                        callback(false, Lang("KickMinNonRustPlayed", steamId));
+                        return;
+                    }
+                    
+                    if (minGameCount > 1 && gameTimeResult.GamesCount < minGameCount)
+                    {
+                        callback(false, Lang("KickGameCount", steamId));
+                        return;
+                    }
+                }
+                
+                // If the server owner wants to check minimum amount of games, but the user has hidden game time
+                // We will get the count over an additional API request via badges
+                if (gameTimeHidden && minGameCount > 1)
+                {
+                    GetSteamBadges(steamId, (badgeStatusCode, badgeResult) =>
+                    {
+                        // Check if the request failed in general
+                        if (badgeStatusCode != (int)StatusCode.Success)
+                        {
+                            ApiError(steamId, "GetPlaytimeInformation", gameTimeStatusCode);
+                            return;
+                        }
+                        
+                        var gamesOwned = ParseBadgeLevel(badgeResult, Badge.GamesOwned);
+                        if (gamesOwned < minGameCount)
+                        {
+                            callback(false, Lang("KickGameCount", steamId));
+                        }
+                        else
+                        {
+                            // Checks passed
+                            callback(true, null);
+                        }
+                    });
+                }
+                else
+                {
+                    // Checks passed
+                    callback(true, null);
+                }
+            });
+        }
+        
+        #endregion
+        #endregion
+
+        #region SteamChecks.Config.cs
+        /// <summary>
+        /// Url to the Steam Web API
+        /// </summary>
+        private const string apiURL = "https://api.steampowered.com";
+        private readonly Regex _steamAvatarRegex =
+        new Regex(@"(?<=<avatarMedium>[\w\W]+)https://.+\.jpg(?=[\w\W]+<\/avatarMedium>)", RegexOptions.Compiled);
+        /// <summary>
+        /// Oxide permission for a whitelist
+        /// </summary>
+        private const string skipPermission = "steamchecks.skip";
+        
+        /// <summary>
+        /// Timeout for a web request
+        /// </summary>
+        private const int webTimeout = 2000;
+        
+        /// <summary>
+        /// This message will be appended to all Kick-messages
+        /// </summary>
+        private string additionalKickMessage;
+        
+        /// <summary>
+        /// API Key to use for the Web API
+        /// </summary>
+        /// <remarks>
+        /// https://steamcommunity.com/dev/apikey
+        /// </remarks>
+        private string apiKey;
+        
+        /// <summary>
+        /// AppID of the game, where the plugin is loaded
+        /// </summary>
+        private uint appId;
+        
+        /// <summary>
+        /// Broadcast kick via chat?
+        /// </summary>
+        private bool broadcastKick;
+        
+        /// <summary>
+        /// Cache players, which joined and failed the checks
+        /// </summary>
+        private bool cacheDeniedPlayers;
+        
+        /// <summary>
+        /// Cache players, which joined and successfully completed the checks
+        /// </summary>
+        private bool cachePassedPlayers;
+        
+        private List<string> discordRolesToMention = new List<string>();
+        
+        private string discordWebHookUrl;
+        
+        /// <summary>
+        /// Set of steamIds, which failed the steam check test on joining
+        /// </summary>
+        /// <remarks>
+        /// Resets after a plugin reload
+        /// </remarks>
+        private HashSet<string> failedList;
+        
+        /// <summary>
+        /// Kick user, when his hours are hidden
+        /// </summary>
+        /// <remarks>
+        /// A lot of steam users have their hours hidden
+        /// </remarks>
+        private bool forceHoursPlayedKick;
+        
+        /// <summary>
+        /// Kick when the user has a Steam Community ban
+        /// </summary>
+        private bool kickCommunityBan;
+        
+        /// <summary>
+        /// Kick when the user has not set up his steam profile yet
+        /// </summary>
+        private bool kickNoProfile;
+        
+        /// <summary>
+        /// Kick when the user has a private profile
+        /// </summary>
+        /// <remarks>
+        /// Most checks depend on a public profile
+        /// </remarks>
+        private bool kickPrivateProfile;
+        
+        /// <summary>
+        /// Kick when the user has a Steam Trade ban
+        /// </summary>
+        private bool kickTradeBan;
+        
+        /// <summary>
+        /// Just log instead of actually kicking users?
+        /// </summary>
+        private bool logInsteadofKick;
+        
+        /// <summary>
+        /// Unix-Time, if the account created by the user is newer/higher than it
+        /// he won't be allowed
+        /// </summary>
+        private long maxAccountCreationTime;
+        
+        /// <summary>
+        /// Maximum amount of game bans, the user is allowed to have
+        /// </summary>
+        private int maxGameBans;
+        
+        /// <summary>
+        /// Maximum amount of rust played
+        /// </summary>
+        private int maxRustHoursPlayed;
+        
+        /// <summary>
+        /// Maximum amount of VAC bans, the user is allowed to have
+        /// </summary>
+        private int maxVACBans;
+        
+        /// <summary>
+        /// Minimum amount of Steam games played - including Rust
+        /// </summary>
+        private int minAllGamesHoursPlayed;
+        
+        /// <summary>
+        /// How old the last VAC ban should minimally
+        /// </summary>
+        private int minDaysSinceLastBan;
+        
+        /// <summary>
+        /// Minimum amount of Steam games
+        /// </summary>
+        private int minGameCount;
+        
+        /// <summary>
+        /// Minimum amount of Steam games played - except Rust
+        /// </summary>
+        private int minOtherGamesPlayed;
+        
+        /// <summary>
+        /// Minimum amount of rust played
+        /// </summary>
+        private int minRustHoursPlayed;
+        
+        /// <summary>
+        /// The minimum steam level, the user must have
+        /// </summary>
+        private int minSteamLevel;
+        
+        /// <summary>
+        /// Set of steamIds, which already passed the steam check test on joining
+        /// </summary>
+        /// <remarks>
+        /// Resets after a plugin reload
+        /// </remarks>
+        private HashSet<string> passedList;
+        
+        #region Methods (Protected)
+        
+        /// <summary>
+        /// Loads default configuration options
+        /// </summary>
+        protected override void LoadDefaultConfig()
+        {
+            Config["ApiKey"] = "";
+            Config["BroadcastKick"] = false;
+            Config["LogInsteadofKick"] = false;
+            Config["AdditionalKickMessage"] = "";
+            Config["CachePassedPlayers"] = true;
+            Config["CacheDeniedPlayers"] = false;
+            Config["Kicking"] = new Dictionary<string, bool>
+            {
+                ["CommunityBan"] = true,
+                ["TradeBan"] = true,
+                ["PrivateProfile"] = true,
+                ["LimitedAccount"] = true,
+                ["NoProfile"] = true,
+                ["FamilyShare"] = false,
+                ["ForceHoursPlayedKick"] = false,
+            };
+            Config["Thresholds"] = new Dictionary<string, long>
+            {
+                ["MaxVACBans"] = 1,
+                ["MinDaysSinceLastBan"] = -1,
+                ["MaxGameBans"] = 1,
+                ["MinSteamLevel"] = 2,
+                ["MaxAccountCreationTime"] = -1,
+                ["MinGameCount"] = 3,
+                ["MinRustHoursPlayed"] = -1,
+                ["MaxRustHoursPlayed"] = -1,
+                ["MinOtherGamesPlayed"] = 2,
+                ["MinAllGamesHoursPlayed"] = -1
+            };
+            Config["DiscordRolesToMention"] = new List<string>();
+            Config["discordWebHookUrl"] = "";
+        }
+        
+        #endregion
+        
+        #region Methods (Private)
+        
+        /// <summary>
+        /// Initializes config options, for every plugin start
+        /// </summary>
+        private void InitializeConfig()
+        {
+            apiKey = Config.Get<string>("ApiKey");
+            broadcastKick = Config.Get<bool>("BroadcastKick");
+            logInsteadofKick = Config.Get<bool>("LogInsteadofKick");
+            additionalKickMessage = Config.Get<string>("AdditionalKickMessage");
+            cachePassedPlayers = Config.Get<bool>("CachePassedPlayers");
+            cacheDeniedPlayers = Config.Get<bool>("CacheDeniedPlayers");
+            
+            kickCommunityBan = Config.Get<bool>("Kicking", "CommunityBan");
+            kickTradeBan = Config.Get<bool>("Kicking", "TradeBan");
+            kickPrivateProfile = Config.Get<bool>("Kicking", "PrivateProfile");
+            kickNoProfile = Config.Get<bool>("Kicking", "NoProfile");
+            forceHoursPlayedKick = Config.Get<bool>("Kicking", "ForceHoursPlayedKick");
+            
+            maxVACBans = Config.Get<int>("Thresholds", "MaxVACBans");
+            minDaysSinceLastBan = Config.Get<int>("Thresholds", "MinDaysSinceLastBan");
+            maxGameBans = Config.Get<int>("Thresholds", "MaxGameBans");
+            
+            
+            minSteamLevel = Config.Get<int>("Thresholds", "MinSteamLevel");
+            
+            minRustHoursPlayed = Config.Get<int>("Thresholds", "MinRustHoursPlayed") * 60;
+            maxRustHoursPlayed = Config.Get<int>("Thresholds", "MaxRustHoursPlayed") * 60;
+            minOtherGamesPlayed = Config.Get<int>("Thresholds", "MinOtherGamesPlayed") * 60;
+            minAllGamesHoursPlayed = Config.Get<int>("Thresholds", "MinAllGamesHoursPlayed") * 60;
+            
+            minGameCount = Config.Get<int>("Thresholds", "MinGameCount");
+            maxAccountCreationTime = Config.Get<long>("Thresholds", "MaxAccountCreationTime");
+            
+            if (!kickPrivateProfile)
+            {
+                if (minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 || minOtherGamesPlayed > 0 ||
+                minAllGamesHoursPlayed > 0)
+                LogWarning(Lang("WarningPrivateProfileHours"));
+                
+                if (minGameCount > 1)
+                LogWarning(Lang("WarningPrivateProfileGames"));
+                
+                if (maxAccountCreationTime > 0)
+                LogWarning(Lang("WarningPrivateProfileCreationTime"));
+                
+                if (minSteamLevel > 0)
+                LogWarning(Lang("WarningPrivateProfileSteamLevel"));
+            }
+            
+            discordRolesToMention = Config.Get<List<string>>("DiscordRolesToMention");
+            discordWebHookUrl = Config.Get<string>("discordWebHookUrl");
+        }
+        
+        #endregion
+        #endregion
+
+        #region SteamChecks.Class.Discord.cs
+        private class WebHookAuthor
+        {
+            [JsonProperty(PropertyName = "icon_url")]
+            public string AuthorIconUrl;
+            
+            [JsonProperty(PropertyName = "url")]
+            public string AuthorUrl;
+            [JsonProperty(PropertyName = "name")]
+            public string Name;
+        }
+        
+        private class WebHookContentBody
+        {
+            [JsonProperty(PropertyName = "content")]
+            public string Content;
+        }
+        
+        private class WebHookEmbed
+        {
+            [JsonProperty(PropertyName = "author")]
+            public WebHookAuthor Author;
+            
+            [JsonProperty(PropertyName = "color")]
+            public int Color;
+            
+            [JsonProperty(PropertyName = "description")]
+            public string Description;
+            
+            [JsonProperty(PropertyName = "fields")]
+            public List<WebHookField> Fields;
+            
+            [JsonProperty(PropertyName = "footer")]
+            public WebHookFooter Footer;
+            
+            [JsonProperty(PropertyName = "image")]
+            public WebHookImage Image;
+            
+            [JsonProperty(PropertyName = "thumbnail")]
+            public WebHookThumbnail Thumbnail;
+            
+            [JsonProperty(PropertyName = "title")]
+            public string Title;
+            
+            [JsonProperty(PropertyName = "type")]
+            public string Type = "rich";
+        }
+        
+        private class WebHookEmbedBody
+        {
+            [JsonProperty(PropertyName = "embeds")]
+            public WebHookEmbed[] Embeds;
+        }
+        
+        private class WebHookField
+        {
+            [JsonProperty(PropertyName = "inline")]
+            public bool Inline;
+            
+            [JsonProperty(PropertyName = "name")]
+            public string Name;
+            
+            [JsonProperty(PropertyName = "value")]
+            public string Value;
+        }
+        
+        private class WebHookFooter
+        {
+            [JsonProperty(PropertyName = "icon_url")]
+            public string IconUrl;
+            
+            [JsonProperty(PropertyName = "proxy_icon_url")]
+            public string ProxyIconUrl;
+            
+            [JsonProperty(PropertyName = "text")]
+            public string Text;
+        }
+        
+        private class WebHookImage
+        {
+            [JsonProperty(PropertyName = "height")]
+            public int? Height;
+            
+            [JsonProperty(PropertyName = "proxy_url")]
+            public string ProxyUrl;
+            
+            [JsonProperty(PropertyName = "url")]
+            public string Url;
+            
+            [JsonProperty(PropertyName = "width")]
+            public int? Width;
+        }
+        
+        private class WebHookThumbnail
+        {
+            [JsonProperty(PropertyName = "height")]
+            public int? Height;
+            
+            [JsonProperty(PropertyName = "proxy_url")]
+            public string ProxyUrl;
+            
+            [JsonProperty(PropertyName = "url")]
+            public string Url;
+            
+            [JsonProperty(PropertyName = "width")]
+            public int? Width;
+        }
+        #endregion
+
         #region SteamChecks.Class.GameTimeInformation.cs
         /// <summary>
         /// Struct for the GetOwnedGames API request
@@ -332,504 +957,59 @@ namespace Oxide.Plugins
         }
         #endregion
 
-        #region SteamChecks.Config.cs
-        /// <summary>
-        /// Url to the Steam Web API
-        /// </summary>
-        private const string apiURL = "https://api.steampowered.com";
-        
-        /// <summary>
-        /// Oxide permission for a whitelist
-        /// </summary>
-        private const string skipPermission = "steamchecks.skip";
-        
-        /// <summary>
-        /// Timeout for a web request
-        /// </summary>
-        private const int webTimeout = 2000;
-        
-        /// <summary>
-        /// This message will be appended to all Kick-messages
-        /// </summary>
-        private string additionalKickMessage;
-        
-        /// <summary>
-        /// API Key to use for the Web API
-        /// </summary>
-        /// <remarks>
-        /// https://steamcommunity.com/dev/apikey
-        /// </remarks>
-        private string apiKey;
-        
-        /// <summary>
-        /// AppID of the game, where the plugin is loaded
-        /// </summary>
-        private uint appId;
-        
-        /// <summary>
-        /// Broadcast kick via chat?
-        /// </summary>
-        private bool broadcastKick;
-        
-        /// <summary>
-        /// Cache players, which joined and failed the checks
-        /// </summary>
-        private bool cacheDeniedPlayers;
-        
-        /// <summary>
-        /// Cache players, which joined and successfully completed the checks
-        /// </summary>
-        private bool cachePassedPlayers;
-        
-        /// <summary>
-        /// Set of steamIds, which failed the steam check test on joining
-        /// </summary>
-        /// <remarks>
-        /// Resets after a plugin reload
-        /// </remarks>
-        private HashSet<string> failedList;
-        
-        /// <summary>
-        /// Kick user, when his hours are hidden
-        /// </summary>
-        /// <remarks>
-        /// A lot of steam users have their hours hidden
-        /// </remarks>
-        private bool forceHoursPlayedKick;
-        
-        /// <summary>
-        /// Kick when the user has a Steam Community ban
-        /// </summary>
-        private bool kickCommunityBan;
-        
-        /// <summary>
-        /// Kick when the user has not set up his steam profile yet
-        /// </summary>
-        private bool kickNoProfile;
-        
-        /// <summary>
-        /// Kick when the user has a private profile
-        /// </summary>
-        /// <remarks>
-        /// Most checks depend on a public profile
-        /// </remarks>
-        private bool kickPrivateProfile;
-        
-        /// <summary>
-        /// Kick when the user has a Steam Trade ban
-        /// </summary>
-        private bool kickTradeBan;
-        
-        /// <summary>
-        /// Just log instead of actually kicking users?
-        /// </summary>
-        private bool logInsteadofKick;
-        
-        /// <summary>
-        /// Unix-Time, if the account created by the user is newer/higher than it
-        /// he won't be allowed
-        /// </summary>
-        private long maxAccountCreationTime;
-        
-        /// <summary>
-        /// Maximum amount of game bans, the user is allowed to have
-        /// </summary>
-        private int maxGameBans;
-        
-        /// <summary>
-        /// Maximum amount of rust played
-        /// </summary>
-        private int maxRustHoursPlayed;
-        
-        /// <summary>
-        /// Maximum amount of VAC bans, the user is allowed to have
-        /// </summary>
-        private int maxVACBans;
-        
-        /// <summary>
-        /// Minimum amount of Steam games played - including Rust
-        /// </summary>
-        private int minAllGamesHoursPlayed;
-        
-        /// <summary>
-        /// How old the last VAC ban should minimally
-        /// </summary>
-        private int minDaysSinceLastBan;
-        
-        /// <summary>
-        /// Minimum amount of Steam games
-        /// </summary>
-        private int minGameCount;
-        
-        /// <summary>
-        /// Minimum amount of Steam games played - except Rust
-        /// </summary>
-        private int minOtherGamesPlayed;
-        
-        /// <summary>
-        /// Minimum amount of rust played
-        /// </summary>
-        private int minRustHoursPlayed;
-        
-        /// <summary>
-        /// The minimum steam level, the user must have
-        /// </summary>
-        private int minSteamLevel;
-        
-        /// <summary>
-        /// Set of steamIds, which already passed the steam check test on joining
-        /// </summary>
-        /// <remarks>
-        /// Resets after a plugin reload
-        /// </remarks>
-        private HashSet<string> passedList;
-        
-        #region Methods (Protected)
-        
-        /// <summary>
-        /// Loads default configuration options
-        /// </summary>
-        protected override void LoadDefaultConfig()
+        #region SteamChecks.Discord.cs
+        private void SendDiscordMessage(string steamId, string reasonMessage, WebHookThumbnail thumbnail)
         {
-            Config["ApiKey"] = "";
-            Config["BroadcastKick"] = false;
-            Config["LogInsteadofKick"] = false;
-            Config["AdditionalKickMessage"] = "";
-            Config["CachePassedPlayers"] = true;
-            Config["CacheDeniedPlayers"] = false;
-            Config["Kicking"] = new Dictionary<string, bool>
+            if (string.IsNullOrEmpty(discordWebHookUrl)) return;
+            
+            var mentions = "";
+            if (discordRolesToMention != null)
+            foreach (var roleId in discordRolesToMention)
             {
-                ["CommunityBan"] = true,
-                ["TradeBan"] = true,
-                ["PrivateProfile"] = true,
-                ["LimitedAccount"] = true,
-                ["NoProfile"] = true,
-                ["FamilyShare"] = false,
-                ["ForceHoursPlayedKick"] = false,
-            };
-            Config["Thresholds"] = new Dictionary<string, long>
-            {
-                ["MaxVACBans"] = 1,
-                ["MinDaysSinceLastBan"] = -1,
-                ["MaxGameBans"] = 1,
-                ["MinSteamLevel"] = 2,
-                ["MaxAccountCreationTime"] = -1,
-                ["MinGameCount"] = 3,
-                ["MinRustHoursPlayed"] = -1,
-                ["MaxRustHoursPlayed"] = -1,
-                ["MinOtherGamesPlayed"] = 2,
-                ["MinAllGamesHoursPlayed"] = -1
-            };
-        }
-        
-        #endregion
-        
-        #region Methods (Private)
-        
-        /// <summary>
-        /// Initializes config options, for every plugin start
-        /// </summary>
-        private void InitializeConfig()
-        {
-            apiKey = Config.Get<string>("ApiKey");
-            broadcastKick = Config.Get<bool>("BroadcastKick");
-            logInsteadofKick = Config.Get<bool>("LogInsteadofKick");
-            additionalKickMessage = Config.Get<string>("AdditionalKickMessage");
-            cachePassedPlayers = Config.Get<bool>("CachePassedPlayers");
-            cacheDeniedPlayers = Config.Get<bool>("CacheDeniedPlayers");
-            
-            kickCommunityBan = Config.Get<bool>("Kicking", "CommunityBan");
-            kickTradeBan = Config.Get<bool>("Kicking", "TradeBan");
-            kickPrivateProfile = Config.Get<bool>("Kicking", "PrivateProfile");
-            kickNoProfile = Config.Get<bool>("Kicking", "NoProfile");
-            forceHoursPlayedKick = Config.Get<bool>("Kicking", "ForceHoursPlayedKick");
-            
-            maxVACBans = Config.Get<int>("Thresholds", "MaxVACBans");
-            minDaysSinceLastBan = Config.Get<int>("Thresholds", "MinDaysSinceLastBan");
-            maxGameBans = Config.Get<int>("Thresholds", "MaxGameBans");
-            
-            
-            minSteamLevel = Config.Get<int>("Thresholds", "MinSteamLevel");
-            
-            minRustHoursPlayed = Config.Get<int>("Thresholds", "MinRustHoursPlayed") * 60;
-            maxRustHoursPlayed = Config.Get<int>("Thresholds", "MaxRustHoursPlayed") * 60;
-            minOtherGamesPlayed = Config.Get<int>("Thresholds", "MinOtherGamesPlayed") * 60;
-            minAllGamesHoursPlayed = Config.Get<int>("Thresholds", "MinAllGamesHoursPlayed") * 60;
-            
-            minGameCount = Config.Get<int>("Thresholds", "MinGameCount");
-            maxAccountCreationTime = Config.Get<long>("Thresholds", "MaxAccountCreationTime");
-            
-            if (!kickPrivateProfile)
-            {
-                if (minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 || minOtherGamesPlayed > 0 ||
-                minAllGamesHoursPlayed > 0)
-                LogWarning(Lang("WarningPrivateProfileHours"));
-                
-                if (minGameCount > 1)
-                LogWarning(Lang("WarningPrivateProfileGames"));
-                
-                if (maxAccountCreationTime > 0)
-                LogWarning(Lang("WarningPrivateProfileCreationTime"));
-                
-                if (minSteamLevel > 0)
-                LogWarning(Lang("WarningPrivateProfileSteamLevel"));
+                mentions += $"<@&{roleId}> ";
             }
-        }
-        
-        #endregion
-        #endregion
-
-        #region SteamChecks.cs
-        /// <summary>
-        /// Checks a steamId, if it would be allowed into the server
-        /// </summary>
-        /// <param name="steamId">steamId64 of the user</param>
-        /// <param name="callback">
-        /// First parameter is true, when the user is allowed, otherwise false
-        /// Second parameter is the reason why he is not allowed, filled out when first is false
-        /// </param>
-        /// <remarks>
-        /// Asynchronously
-        /// Runs through all checks one-by-one
-        /// 1. Bans
-        /// 2. Player Summaries (Private profile, Creation time)
-        /// 3. Player Level
-        /// Via <see cref="CheckPlayerGameTime"></see>
-        /// 4. Game Hours and Count
-        /// 5. Game badges, to get amount of games if user has hidden Game Hours
-        /// </remarks>
-        private void CheckPlayer(string steamId, Action<bool, string> callback)
-        {
-            // Check Bans first, as they are also visible on private profiles
-            GetPlayerBans(steamId, (banStatusCode, banResponse) =>
+            
+            var message = Lang("DiscordMessage");
+            
+            var contentBody = new WebHookContentBody
             {
-                if (banStatusCode != (int)StatusCode.Success)
-                {
-                    ApiError(steamId, "GetPlayerBans", banStatusCode);
-                    return;
-                }
-                
-                if (banResponse.CommunityBan && kickCommunityBan)
-                {
-                    callback(false, Lang("KickCommunityBan", steamId));
-                    return;
-                }
-                
-                if (banResponse.EconomyBan && kickTradeBan)
-                {
-                    callback(false, Lang("KickTradeBan", steamId));
-                    return;
-                }
-                
-                if (banResponse.GameBanCount > maxGameBans && maxGameBans > -1)
-                {
-                    callback(false, Lang("KickGameBan", steamId));
-                    return;
-                }
-                
-                if (banResponse.VacBanCount > maxVACBans && maxVACBans > -1)
-                {
-                    callback(false, Lang("KickVacBan", steamId));
-                    return;
-                }
-                
-                if (banResponse.LastBan > 0 && banResponse.LastBan < minDaysSinceLastBan && minDaysSinceLastBan > 0)
-                {
-                    callback(false, Lang("KickVacBan", steamId));
-                    return;
-                }
-                
-                //get Player summaries - we have to check if the profile is public
-                GetSteamPlayerSummaries(steamId, (statusCode, sumResult) =>
-                {
-                    if (statusCode != (int)StatusCode.Success)
-                    {
-                        ApiError(steamId, "GetSteamPlayerSummaries", statusCode);
-                        return;
-                    }
-                    
-                    if (sumResult.NoProfile && kickNoProfile)
-                    {
-                        callback(false, Lang("KickNoProfile", steamId));
-                        return;
-                    }
-                    
-                    // Is profile not public?
-                    if (sumResult.Visibility != PlayerSummary.VisibilityType.Public)
-                    {
-                        if (kickPrivateProfile)
-                        {
-                            callback(false, Lang("KickPrivateProfile", steamId));
-                            return;
-                        }
-                        else
-                        {
-                            // If it is not public, we can cancel checks here and allow the player in
-                            callback(true, null);
-                            return;
-                        }
-                    }
-                    
-                    // Check how old the account is
-                    if (maxAccountCreationTime > 0 && sumResult.Timecreated > maxAccountCreationTime)
-                    {
-                        callback(false, Lang("KickMaxAccountCreationTime", steamId));
-                        return;
-                    }
-                    
-                    // Check Steam Level
-                    if (minSteamLevel > 0)
-                    {
-                        GetSteamLevel(steamId, (steamLevelStatusCode, steamLevelResult) =>
-                        {
-                            if (steamLevelStatusCode != (int)StatusCode.Success)
-                            {
-                                ApiError(steamId, "GetSteamLevel", statusCode);
-                                return;
-                            }
-                            
-                            if (minSteamLevel > steamLevelResult)
-                            {
-                                callback(false, Lang("KickMinSteamLevel", steamId));
-                            }
-                            else
-                            {
-                                // Check game time, and amount of games
-                                if (minGameCount > 1 || minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
-                                minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
-                                CheckPlayerGameTime(steamId, callback);
-                                else // Player now already passed all checks
-                                callback(true, null);
-                            }
-                        });
-                    }
-                    // Else, if level check not done, Check game time, and amount of games
-                    else if (minGameCount > 1 || minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
-                    minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
-                    {
-                        CheckPlayerGameTime(steamId, callback);
-                    }
-                    else // Player now already passed all checks
-                    {
-                        callback(true, null);
-                    }
-                });
-            });
-        }
-        
-        /// <summary>
-        /// Checks a steamId, and if it would be allowed into the server
-        /// Called by <see cref="CheckPlayer"></see>
-        /// </summary>
-        /// <param name="steamId">steamId64 of the user</param>
-        /// <param name="callback">
-        /// First parameter is true, when the user is allowed, otherwise false
-        /// Second parameter is the reason why he is not allowed, filled out when first is false
-        /// </param>
-        /// <remarks>
-        /// Regards those specific parts:
-        /// - Game Hours and Count
-        /// - Game badges, to get amount of games if user has hidden Game Hours
-        /// </remarks>
-        void CheckPlayerGameTime(string steamId, Action<bool, string> callback)
-        {
-            GetPlaytimeInformation(steamId, (gameTimeStatusCode, gameTimeResult) =>
+                Content = $"{mentions}{message}"
+            };
+            
+            var color = 3092790;
+            var player = BasePlayer.FindAwakeOrSleeping(steamId);
+            
+            var firstBody = new WebHookEmbedBody
             {
-                // Players can additionally hide their play time, check
-                var gameTimeHidden = false;
-                if (gameTimeStatusCode == (int)StatusCode.GameInfoHidden)
+                Embeds = new[]
                 {
-                    gameTimeHidden = true;
-                }
-                // Check if the request failed in general
-                else if (gameTimeStatusCode != (int)StatusCode.Success)
-                {
-                    ApiError(steamId, "GetPlaytimeInformation", gameTimeStatusCode);
-                    return;
-                }
-                
-                // In rare cases, the SteamAPI returns all games, however with the game time set to 0. (when the user has this info hidden)
-                if (gameTimeResult != null && (gameTimeResult.PlaytimeRust == 0 || gameTimeResult.PlaytimeAll == 0))
-                gameTimeHidden = true;
-                
-                // If the server owner really wants a hour check, we will kick
-                if (gameTimeHidden && forceHoursPlayedKick)
-                {
-                    if (minRustHoursPlayed > 0 || maxRustHoursPlayed > 0 ||
-                    minOtherGamesPlayed > 0 || minAllGamesHoursPlayed > 0)
+                    new WebHookEmbed
                     {
-                        callback(false, Lang("KickHoursPrivate", steamId));
-                        return;
+                        Color = color,
+                        Thumbnail = thumbnail,
+                        Description =
+                        $"Player{Environment.NewLine}[{player?.displayName??steamId}](https://steamcommunity.com/profiles/{steamId})" +
+                        $"{Environment.NewLine}{Environment.NewLine}Steam ID{Environment.NewLine}{steamId}" +
+                        $"{Environment.NewLine}{Environment.NewLine}{reasonMessage}"
                     }
                 }
-                // Check the times and game count now, when not hidden
-                else if (!gameTimeHidden && gameTimeResult!=null)
+            };
+            
+            webrequest.Enqueue(discordWebHookUrl,
+            JsonConvert.SerializeObject(contentBody,
+            new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }),
+            (headerCode, headerResult) =>
+            {
+                if (headerCode >= 200 && headerCode <= 204)
                 {
-                    if (minRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust < minRustHoursPlayed)
-                    {
-                        callback(false, Lang("KickMinRustHoursPlayed", steamId));
-                        return;
-                    }
-                    
-                    if (maxRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust > maxRustHoursPlayed)
-                    {
-                        callback(false, Lang("KickMaxRustHoursPlayed", steamId));
-                        return;
-                    }
-                    
-                    if (minAllGamesHoursPlayed > 0 && gameTimeResult.PlaytimeAll < minAllGamesHoursPlayed)
-                    {
-                        callback(false, Lang("KickMinSteamHoursPlayed", steamId));
-                        return;
-                    }
-                    
-                    if (minOtherGamesPlayed > 0 &&
-                    (gameTimeResult.PlaytimeAll - gameTimeResult.PlaytimeRust) < minOtherGamesPlayed &&
-                    gameTimeResult.GamesCount >
-                    1) // it makes only sense to check, if there are other games in the result set
-                    {
-                        callback(false, Lang("KickMinNonRustPlayed", steamId));
-                        return;
-                    }
-                    
-                    if (minGameCount > 1 && gameTimeResult.GamesCount < minGameCount)
-                    {
-                        callback(false, Lang("KickGameCount", steamId));
-                        return;
-                    }
+                    webrequest.Enqueue(discordWebHookUrl,
+                    JsonConvert.SerializeObject(firstBody,
+                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }),
+                    (firstCode, firstResult) => { }, this, RequestMethod.POST,
+                    new Dictionary<string, string> { { "Content-Type", "application/json" } });
                 }
-                
-                // If the server owner wants to check minimum amount of games, but the user has hidden game time
-                // We will get the count over an additional API request via badges
-                if (gameTimeHidden && minGameCount > 1)
-                {
-                    GetSteamBadges(steamId, (badgeStatusCode, badgeResult) =>
-                    {
-                        // Check if the request failed in general
-                        if (badgeStatusCode != (int)StatusCode.Success)
-                        {
-                            ApiError(steamId, "GetPlaytimeInformation", gameTimeStatusCode);
-                            return;
-                        }
-                        
-                        var gamesOwned = ParseBadgeLevel(badgeResult, Badge.GamesOwned);
-                        if (gamesOwned < minGameCount)
-                        {
-                            callback(false, Lang("KickGameCount", steamId));
-                        }
-                        else
-                        {
-                            // Checks passed
-                            callback(true, null);
-                        }
-                    });
-                }
-                else
-                {
-                    // Checks passed
-                    callback(true, null);
-                }
-            });
+            }, this, RequestMethod.POST,
+            new Dictionary<string, string> { { "Content-Type", "application/json" } });
         }
         #endregion
 
@@ -965,6 +1145,17 @@ namespace Oxide.Plugins
                 if (cacheDeniedPlayers && failedList.Contains(player.Id))
                 {
                     Log("{0} / {1} failed a check already previously", player.Name, player.Id);
+                    webrequest.Enqueue($"https://steamcommunity.com/profiles/{player.Id}?xml=1", string.Empty,
+                    (code, result) =>
+                    {
+                        WebHookThumbnail thumbnail = null;
+                        if (code >= 200 && code <= 204)
+                        thumbnail = new WebHookThumbnail
+                        {
+                            Url = _steamAvatarRegex.Match(result).Value
+                        };
+                        SendDiscordMessage(player.Id, "The player would not pass the checks. Reason: " + additionalKickMessage, thumbnail);
+                    }, this);
                     player.Kick(Lang("KickGeneric", player.Id) + " " + additionalKickMessage);
                     return;
                 }
@@ -987,6 +1178,17 @@ namespace Oxide.Plugins
                     {
                         Log("{0} / {1} kicked. Reason: {2}", player.Name, player.Id, reason);
                         failedList.Add(player.Id);
+                        webrequest.Enqueue($"https://steamcommunity.com/profiles/{player.Id}?xml=1", string.Empty,
+                        (code, result) =>
+                        {
+                            WebHookThumbnail thumbnail = null;
+                            if (code >= 200 && code <= 204)
+                            thumbnail = new WebHookThumbnail
+                            {
+                                Url = _steamAvatarRegex.Match(result).Value
+                            };
+                            SendDiscordMessage(player.Id, $"The player would not pass the checks. Reason: {reason} {additionalKickMessage}" , thumbnail);
+                        }, this);
                         player.Kick(reason + " " + additionalKickMessage);
                         
                         if (broadcastKick)
@@ -1052,6 +1254,7 @@ namespace Oxide.Plugins
                 ["KickMaxAccountCreationTime"] = "Your Steam account is too new.",
                 
                 ["KickGeneric"] = "Your Steam account fails our test.",
+                ["DiscordMessage"] = "User failed Steam Checks"
             }, this);
         }
         #endregion
@@ -1083,7 +1286,22 @@ namespace Oxide.Plugins
                 if (playerAllowed)
                 TestResult(player, "CheckPlayer", "The player would pass the checks");
                 else
-                TestResult(player, "CheckPlayer", "The player would not pass the checks. Reason: " + reason);
+                {
+                    webrequest.Enqueue($"https://steamcommunity.com/profiles/{steamId}?xml=1", string.Empty,
+                    (code, result) =>
+                    {
+                        WebHookThumbnail thumbnail = null;
+                        if (code >= 200 && code <= 204)
+                        thumbnail = new WebHookThumbnail
+                        {
+                            Url = _steamAvatarRegex.Match(result).Value
+                        };
+                        SendDiscordMessage(steamId, "The player would not pass the checks. Reason: " + reason, thumbnail);
+                    }, this);
+                    
+                    
+                    TestResult(player, "CheckPlayer", "The player would not pass the checks. Reason: " + reason);
+                }
             });
         }
         

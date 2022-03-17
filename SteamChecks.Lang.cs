@@ -51,6 +51,7 @@ namespace Oxide.Plugins
                 ["KickMaxAccountCreationTime"] = "Your Steam account is too new.",
 
                 ["KickGeneric"] = "Your Steam account fails our test.",
+                ["DiscordMessage"] = "User failed Steam Checks"
             }, this);
         }
     }

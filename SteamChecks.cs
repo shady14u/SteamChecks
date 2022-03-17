@@ -6,10 +6,13 @@ using System;
 
 namespace Oxide.Plugins
 {
-    [Info("Steam Checks", "Shady14u", "5.0.6")]
+    //Define:FileOrder=1
+    [Info("Steam Checks", "Shady14u", "5.0.7")]
     [Description("Kick players depending on information on their Steam profile")]
     public partial class SteamChecks : CovalencePlugin
     {
+        #region Methods (Private)
+
         /// <summary>
         /// Checks a steamId, if it would be allowed into the server
         /// </summary>
@@ -193,7 +196,7 @@ namespace Oxide.Plugins
                     }
                 }
                 // Check the times and game count now, when not hidden
-                else if (!gameTimeHidden && gameTimeResult!=null)
+                else if (!gameTimeHidden && gameTimeResult != null)
                 {
                     if (minRustHoursPlayed > 0 && gameTimeResult.PlaytimeRust < minRustHoursPlayed)
                     {
@@ -261,5 +264,7 @@ namespace Oxide.Plugins
                 }
             });
         }
+
+        #endregion
     }
 }

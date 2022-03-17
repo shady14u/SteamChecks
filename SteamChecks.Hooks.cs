@@ -64,6 +64,17 @@ namespace Oxide.Plugins
                 if (cacheDeniedPlayers && failedList.Contains(player.Id))
                 {
                     Log("{0} / {1} failed a check already previously", player.Name, player.Id);
+                    webrequest.Enqueue($"https://steamcommunity.com/profiles/{player.Id}?xml=1", string.Empty,
+                    (code, result) =>
+                    {
+                        WebHookThumbnail thumbnail = null;
+                        if (code >= 200 && code <= 204)
+                            thumbnail = new WebHookThumbnail
+                            {
+                                Url = _steamAvatarRegex.Match(result).Value
+                            };
+                        SendDiscordMessage(player.Id, "The player would not pass the checks. Reason: " + additionalKickMessage, thumbnail);
+                    }, this);
                     player.Kick(Lang("KickGeneric", player.Id) + " " + additionalKickMessage);
                     return;
                 }
@@ -86,6 +97,17 @@ namespace Oxide.Plugins
                     {
                         Log("{0} / {1} kicked. Reason: {2}", player.Name, player.Id, reason);
                         failedList.Add(player.Id);
+                        webrequest.Enqueue($"https://steamcommunity.com/profiles/{player.Id}?xml=1", string.Empty,
+                    (code, result) =>
+                    {
+                        WebHookThumbnail thumbnail = null;
+                        if (code >= 200 && code <= 204)
+                            thumbnail = new WebHookThumbnail
+                            {
+                                Url = _steamAvatarRegex.Match(result).Value
+                            };
+                        SendDiscordMessage(player.Id, $"The player would not pass the checks. Reason: {reason} {additionalKickMessage}" , thumbnail);
+                    }, this);
                         player.Kick(reason + " " + additionalKickMessage);
 
                         if (broadcastKick)

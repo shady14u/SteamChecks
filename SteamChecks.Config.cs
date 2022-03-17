@@ -1,18 +1,21 @@
 ﻿#region Using Statements
 
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 #endregion
 
 namespace Oxide.Plugins
 {
+    //Define:FileOrder=2
     public partial class SteamChecks
     {
         /// <summary>
         /// Url to the Steam Web API
         /// </summary>
         private const string apiURL = "https://api.steampowered.com";
-
+        private readonly Regex _steamAvatarRegex =
+            new Regex(@"(?<=<avatarMedium>[\w\W]+)https://.+\.jpg(?=[\w\W]+<\/avatarMedium>)", RegexOptions.Compiled);
         /// <summary>
         /// Oxide permission for a whitelist
         /// </summary>
@@ -55,6 +58,10 @@ namespace Oxide.Plugins
         /// Cache players, which joined and successfully completed the checks
         /// </summary>
         private bool cachePassedPlayers;
+
+        private List<string> discordRolesToMention = new List<string>();
+
+        private string discordWebHookUrl;
 
         /// <summary>
         /// Set of steamIds, which failed the steam check test on joining
@@ -195,6 +202,8 @@ namespace Oxide.Plugins
                 ["MinOtherGamesPlayed"] = 2,
                 ["MinAllGamesHoursPlayed"] = -1
             };
+            Config["DiscordRolesToMention"] = new List<string>();
+            Config["discordWebHookUrl"] = "";
         }
 
         #endregion
@@ -249,6 +258,9 @@ namespace Oxide.Plugins
                 if (minSteamLevel > 0)
                     LogWarning(Lang("WarningPrivateProfileSteamLevel"));
             }
+
+            discordRolesToMention = Config.Get<List<string>>("DiscordRolesToMention");
+            discordWebHookUrl = Config.Get<string>("discordWebHookUrl");
         }
 
         #endregion

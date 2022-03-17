@@ -127,6 +127,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="SteamChecks.Class.Discord.cs" />
     <Compile Include="SteamChecks.Class.GameTimeInformation.cs" />
     <Compile Include="SteamChecks.Class.PlayerBans.cs" />
     <Compile Include="SteamChecks.Class.PlayerSummary.cs" />
@@ -137,6 +138,7 @@
     <Compile Include="SteamChecks.Class.SteamResponse.cs" />
     <Compile Include="SteamChecks.Config.cs" />
     <Compile Include="SteamChecks.cs" />
+    <Compile Include="SteamChecks.Discord.cs" />
     <Compile Include="SteamChecks.Enum.Badge.cs" />
     <Compile Include="SteamChecks.Enum.StatusCode.cs" />
     <Compile Include="SteamChecks.Enum.SteamRequestType.cs" />

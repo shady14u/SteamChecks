@@ -20,7 +20,7 @@ namespace Oxide.Plugins
         /// <param name="args">steamid64 to test for</param>
         [Command("steamcheck"), Permission("steamchecks.use")]
         private void SteamCheckCommand(IPlayer player, string command, string[] args)
-        {
+        { 
             if (args.Length != 1)
             {
                 TestResult(player, "SteamCheckTests", "You have to provide a SteamID64 as first argument");
@@ -34,7 +34,22 @@ namespace Oxide.Plugins
                 if (playerAllowed)
                     TestResult(player, "CheckPlayer", "The player would pass the checks");
                 else
+                {
+                    webrequest.Enqueue($"https://steamcommunity.com/profiles/{steamId}?xml=1", string.Empty,
+                    (code, result) =>
+                    {
+                        WebHookThumbnail thumbnail = null;
+                        if (code >= 200 && code <= 204)
+                            thumbnail = new WebHookThumbnail
+                            {
+                                Url = _steamAvatarRegex.Match(result).Value
+                            };
+                        SendDiscordMessage(steamId, "The player would not pass the checks. Reason: " + reason, thumbnail);
+                    }, this);
+
+                    
                     TestResult(player, "CheckPlayer", "The player would not pass the checks. Reason: " + reason);
+                }
             });
         }
 
