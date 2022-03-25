@@ -1,3 +1,4 @@
+#define DEBUG
 using Newtonsoft.Json;
 using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
